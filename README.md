@@ -38,10 +38,59 @@ FastAPI 사용, Pydantic 스키마 검사, API 문서 `/docs` 자동 제공.
 - API 응답에는 위험 점수, 위험 단계, 가능한 SOFA 점수, SHAP 설명 포함.
 - CPU 4코어 참고 기준, batch=1/24h 입력, 10회 워밍업 + 100회 요청 평균 및 P95 지연 측정, 평균 ≤200ms 목표.
 - Dockerfile 및 Compose 연동, `.env`로 민감정보 관리, 버전 고정.
-- **현재 상태:** 초기 README 및 요구사항 정리. 서버/엔드포인트 구현 전.
+- **현재 상태:** AI-10 최소 서버 코드 작성: `/health`, `/predict`, `/predict_batch`. 실제 모델 연동 실행 및 부하 검증은 로컬 확인 전. `/explain`과 Docker/Compose는 미구현.
 
 ## 구현 우선순위
 입출력 JSON 계약 → `/health` → Mock `/predict` → AI 모델 실제 연동 → batch/explain → 지연/오류 검사.
 
 ## 팀 역할 및 개인 기여
 추후 팀원별 담당/실제 커밋을 기록할 것.
+
+## AI-10 로컬 FastAPI 연결 검증 (2026-11-10)
+
+AI 저장소에서 승인된 단일 **미보정** LSTM을 로딩하는 최소 서버입니다. 모델은 시작할 때 **1회** 로딩하고, 다른 폴드 체크포인트나 새로운 모델로 바꾸지 않습니다. 원래 잠금 정책의 threshold=0.2, 최초 23개 기록 무경보를 그대로 유지합니다.
+
+**입력 계약 정정:** 위 초기 API 초안의 '최근 24시간 기록'만으로는 학습 입력을 재현할 수 없습니다. 학습 전처리에는 각 변수의 마지막 실측 시점 이후 경과시간 채널이 있으므로, **현재 시점까지 누적된 환자별 전체 시간 기록**을 입력해야 합니다. 현재 API는 환자별 전체 기록을 각 요청에 전달하는 형태이며, 서버가 환자 상태를 저장하지 않습니다.
+
+데스크탑 Windows PowerShell 실행 예 (AI 저장소는 `C:\AI`에 있다고 가정):
+
+```powershell
+cd C:\
+git clone https://github.com/Sepis-SEWS/Backend.git
+cd C:\Backend
+python -m pip install -r requirements.txt
+# AI 저장소에도 torch/pandas/numpy 등 학습·추론 의존성이 설치돼 있어야 합니다.
+$env:SEWS_AI_REPO_ROOT = "C:\AI"
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+다른 터미널에서:
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/health
+# 요청 스키마는 http://127.0.0.1:8000/docs 에서 확인
+```
+
+테스트 전용 의존성 설치 후, 실제 모델을 로딩하지 않는 **합성 데이터 API 계약 테스트**:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+**요청 예시 (축약; 실제 운영에서는 16개 원본 변수를 각 시점에 모두 명시)**:
+
+```json
+{
+  "patient_id": "synthetic-001",
+  "observations": [
+    {"ICULOS": 1, "HR": 80.0, "Temp": null}
+  ]
+}
+```
+
+이 예시의 관측값은 **실제 요청에 필요한 전체 변수 집합을 생략한 스키마 설명용**이므로, 모델 예측에 그대로 사용하지 않습니다. 누락 변수는 AI 공통 전처리 단계에서 422로 거부됩니다. 모든 변수는 관측되지 않은 경우 null로 제공하세요.
+
+`POST /predict`는 환자 ID와 `status`, `risk_score`, `alert`, `score_threshold`, `records_received`, `minimum_records`, `calibrated_probability=null`을 반환합니다. 24행 미만은 `risk_score=null`, `alert=false`; 모델 점수는 **임상적 발생 확률이 아닙니다.** `POST /predict_batch`는 최대 32개 환자를 순차적으로 추론하며 중복 patient_id를 거부합니다. 로그와 API 요청에는 실제 환자식별정보를 사용하지 마세요.
+
+미구현 항목: `/explain`, SOFA/qSOFA 전체 점수, 확률 보정 모델, 임상 위험 단계별 별도 임계값, 실제 HTTP 평균/P95 지연 측정, 배포용 인증·접근제어·Docker/Compose. **최종 Test 데이터는 다시 평가하지 않습니다.**
