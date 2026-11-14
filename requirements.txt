@@ -1,5 +1,5 @@
-fastapi>=0.110,<1
-uvicorn>=0.27,<1
-pydantic>=2.6,<3
+fastapi==0.162.7
+uvicorn==0.54.0
+pydantic==2.14.3
 # AI model dependencies are installed in the sibling AI repository.
 # Run from AI: python -m pip install -r requirements.txt

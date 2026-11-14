@@ -1,4 +1,5 @@
 """Contract tests: synthetic records only; no model or patient data is loaded."""
+
 import unittest
 
 from fastapi.testclient import TestClient
@@ -56,16 +57,18 @@ class ApiContractTests(unittest.TestCase):
         self.assertIsNone(r.json()["risk_score"])
 
     def test_batch(self):
-        r = self.client.post("/predict_batch", json={
-            "patients": [self.patient("a", 23), self.patient("b", 24)]
-        })
+        r = self.client.post(
+            "/predict_batch",
+            json={"patients": [self.patient("a", 23), self.patient("b", 24)]},
+        )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(len(r.json()), 2)
 
     def test_duplicate_batch_id(self):
-        r = self.client.post("/predict_batch", json={
-            "patients": [self.patient("same", 23), self.patient("same", 24)]
-        })
+        r = self.client.post(
+            "/predict_batch",
+            json={"patients": [self.patient("same", 23), self.patient("same", 24)]},
+        )
         self.assertEqual(r.status_code, 422)
 
     def test_missing_input(self):
