@@ -47,12 +47,129 @@
 - **확인·기록:** 경보 확인 후 조치 저장. 반복 요청 중복 방지.
 - **상태:** `/health` → 모델 준비·DB 상태 분리 확인.
 
+## 실행에 필요한 파일
+
+세 저장소가 같은 부모 폴더에 있어야 합니다.
+
+```text
+Sepsis-SEWS.Team/
+├── AI/
+│   ├── models/
+│   │   ├── lstm_full_pw10_best.pt          # GitHub에 없음. 별도 전달
+│   │   └── lstm_preprocessing_stats.json   # GitHub에 없음. 별도 전달
+│   ├── src/inference/predict_lstm.py
+│   └── reports/final_evaluation_policy_locked.json
+├── Backend/
+└── Frontend/
+```
+
+| 파일 | 역할 |
+|---|---|
+| `AI/models/lstm_full_pw10_best.pt` | 승인 LSTM 가중치 |
+| `AI/models/lstm_preprocessing_stats.json` | 학습 당시 전처리 통계 |
+| `AI/reports/final_evaluation_policy_locked.json` | 체크섬·임계값 `0.2` 검증 |
+| `AI/src/inference/predict_lstm.py` | 유일한 추론 구현 |
+| `Backend/requirements.txt` | FastAPI 실행 의존성 |
+| `AI/requirements.txt` | torch 등 모델 로드 의존성 |
+| `Frontend/requirements.txt` | Streamlit 실행 의존성 |
+| 비식별 JSON | 대시보드에 넣을 관측 데이터. `/predict`만으로는 저장되지 않음 |
+
+모델 두 파일은 `.gitignore` 대상이라 `git pull`로 받지 않습니다. `.pt`는 압축을 풀지 말고 파일 그대로 `AI/models/`에 둡니다. 체크섬이 정책 파일과 같아야 로드됩니다.
+
+설정 예시는 [.env.example](.env.example)입니다. 서버가 `.env`를 자동으로 읽지 않으므로 아래처럼 환경변수를 직접 설정합니다.
+
+## 실행
+
+Python **3.11**. 터미널 두 개를 사용합니다. **백엔드를 먼저** 켭니다.
+
+### 1. 설치 (최초 1회)
+
+Backend:
+
+```sh
+cd Backend
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r ../AI/requirements.txt
+```
+
+Frontend:
+
+```sh
+cd Frontend
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+### 2. 백엔드
+
+```sh
+cd Backend
+export SEWS_AI_REPO_ROOT="$(pwd)/../AI"
+export SEWS_DATABASE_PATH="$(pwd)/data/sews.sqlite"
+.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+```
+
+확인: http://127.0.0.1:8000/health  
+`status=ok`, `model_ready=true`이면 실제 모델이 로드된 상태입니다. 모델 파일이 없으면 `degraded`이며 가짜 점수로 대체하지 않습니다.
+
+Windows PowerShell:
+
+```powershell
+cd Backend
+$env:SEWS_AI_REPO_ROOT = (Resolve-Path ..\AI).Path
+$env:SEWS_DATABASE_PATH = (Join-Path (Get-Location) 'data\sews.sqlite')
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+```
+
+### 3. 관측 가져오기 (대시보드에 환자를 넣을 때)
+
+백엔드와 **같은** `SEWS_DATABASE_PATH`를 사용합니다.
+
+```sh
+cd Backend
+export SEWS_AI_REPO_ROOT="$(pwd)/../AI"
+export SEWS_DATABASE_PATH="$(pwd)/data/sews.sqlite"
+.venv/bin/python import_cli.py 관측파일.json
+```
+
+JSON에는 `encounter_id`, source `patient_id`, `bed`, `assignee`, `icu_id=ICU-A`, 시간(`admission_anchor` 또는 행별 `observed_at`)과 16개 특징이 필요합니다. ICULOS는 `1..n` 시간 격자입니다.
+
+### 4. 프론트 API 모드
+
+**다른 터미널.** 백엔드가 떠 있는 상태에서:
+
+```sh
+cd Frontend
+export SEWS_MODE=api
+export API_BASE_URL=http://127.0.0.1:8000
+.venv/bin/streamlit run app.py
+```
+
+화면: http://127.0.0.1:8501  
+헤더에 **연결 정상**이 보이면 백엔드·실제 모델과 붙은 상태입니다. 데모 점수로 바뀌지 않습니다.
+
+백엔드가 토큰을 요구할 때만, Backend와 Frontend에 같은 값을 넣습니다.
+
+```sh
+export SEWS_API_TOKEN='로컬-개발용-토큰'
+```
+
+### 5. 프론트 데모만 (백엔드 없이)
+
+```sh
+cd Frontend
+.venv/bin/streamlit run app.py
+```
+
+합성 데이터입니다. 실제 모델 결과가 아닙니다.
+
+종료는 각 터미널에서 `Ctrl+C`입니다.
+
 ## 운영 기준·제한
 
-- **환경:** Python 3.11 · FastAPI · SQLite · 단일 worker · 로컬 접속.
-- **설정:** [.env.example](.env.example) 참고. 환경변수 직접 설정, `.env` 자동 로드 없음.
-- **공유 경로:** API·CLI는 같은 DB 사용. Frontend는 `SEWS_MODE=api`, `API_BASE_URL` 설정.
-- **입력 방식:** 시간당 비식별 파일 가져오기. 실시간 병원 수집 아님.
-- **모델 미준비:** 추론 503. 가짜 점수 대체 없음.
-- **미지원:** 보정 확률·SHAP·완전 SOFA·임상 운영 인증.
-- **검증 한계:** 승인 가중치·통계 파일 필요. 해당 파일 없이는 실제 모델 검증 불가.
+- FastAPI worker 1개, `--host 127.0.0.1`. access log는 끄세요.
+- API와 CLI는 같은 DB 절대 경로를 써야 합니다.
+- 입력은 시간당 비식별 파일 가져오기입니다. 실시간 병원 수집이 아닙니다.
+- 모델 미준비 시 추론 503. 가짜 점수 대체 없음.
+- 미지원: 보정 확률·SHAP·완전 SOFA·임상 운영 인증.
