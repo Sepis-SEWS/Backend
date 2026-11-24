@@ -15,6 +15,7 @@
 - **활력징후 7개:** HR, Temp, SBP, DBP, MAP, Resp, O2Sat.
 - **검사 9개:** WBC, Lactate, Creatinine, Bilirubin_total, Platelets, FiO2, BUN, Glucose, pH.
 - **결측:** `null` 유지. 라벨·잘못된 시각·무한값 거부.
+- **연구 데이터:** PhysioNet 2019 전체를 변환해 적재(3-1절). 시각은 원본 관측 시각이 아닌 재생 시각.
 - **추론:** 전체 누적 이력 전달 → 최근 24행 모델 입력 구성. 미래 데이터 사용 금지.
 
 ## 위험도 점수
@@ -71,6 +72,8 @@ Sepsis-SEWS.Team/
 | `AI/src/inference/predict_lstm.py` | 유일한 추론 구현 |
 | `Backend/requirements.txt` | FastAPI 실행 의존성 |
 | `AI/requirements.txt` | torch 등 모델 로드 의존성 |
+| `tools/physionet2019/` | PhysioNet 2019 변환·검증·일괄 실행(`run`) 스크립트 |
+| `AI/data/data-sepsis/training/` | PhysioNet 2019 원본(팀 공통 위치, 커밋 안 함) |
 | `Frontend/requirements.txt` | Streamlit 실행 의존성 |
 | 비식별 JSON | 대시보드에 넣을 관측 데이터. `/predict`만으로는 저장되지 않음 |
 
@@ -133,7 +136,145 @@ export SEWS_DATABASE_PATH="$(pwd)/data/sews.sqlite"
 .venv/bin/python import_cli.py 관측파일.json
 ```
 
-JSON에는 `encounter_id`, source `patient_id`, `bed`, `assignee`, `icu_id=ICU-A`, 시간(`admission_anchor` 또는 행별 `observed_at`)과 16개 특징이 필요합니다. ICULOS는 `1..n` 시간 격자입니다.
+JSON에는 `encounter_id`, source `patient_id`, `bed`, `assignee`, `icu_id=ICU-A`, 시간(`admission_anchor` 또는 행별 `observed_at`)과 16개 특징이 필요합니다. ICULOS는 원본 값 그대로이며, 첫 값이 1 이상의 정수이고 이후 1시간씩 빠짐없이 이어져야 합니다(예: 1,2,3… 또는 5,6,7…).
+
+### 3-1. PhysioNet 2019 전체 데이터로 로컬 DB 만들기
+
+원본과 변환 결과는 **커밋하지 않습니다.** 팀 공통 위치(`AI/data/data-sepsis/training`)의 원본으로 같은 스크립트를 돌리면 같은 변환 JSON(바이트 단위)과 같은 환자·관측값·점수·경보 시각의 DB가 만들어집니다. 예측·경보 ID와 계산 시각만 다릅니다. `data/`는 `.gitignore` 대상입니다.
+
+**한 번에 실행 (권장)**
+
+Backend 폴더에서 명령 하나로 변환 → 검증 → 적재 → 결과 요약까지 진행합니다.
+
+```sh
+cd Backend
+.venv/bin/python -m tools.physionet2019.run
+```
+
+| 단계 | 하는 일 | 기록 |
+|---|---|---|
+| 1. 변환 | 원본 40,336명 전부 `.psv` → JSON. 라벨 제외, 결측 `null`, 단위 유지, 재생 시각 부여 | `data/import/physionet2019/_conversion_report.json` (데이터 버전·원본 해시·대상 목록·실패 원인) |
+| 2. 검증 | 백엔드 규격·라벨 부재·ICULOS 격자·재생 시각 표시·원본 값과 일치 | 화면 `valid N/N`, 실패 시 `FAIL` 줄 |
+| 3. 적재 | `import_cli.py`로 DB 적재. 1%마다 진행률 표시 | `data/import/_import_report.json` (성공·실패 건수, 실패 원인), `data/import/_import_log.jsonl` |
+| 4. 요약 | `/patients`, `/patients/{id}`, `/alerts`에 보일 내용 | 화면 |
+
+경로는 자동으로 정해집니다. 다르면 옵션으로 바꿉니다.
+
+| 항목 | 우선순위 |
+|---|---|
+| 원본 | `--source-root` → `$SEWS_AI_REPO_ROOT/data/data-sepsis/training` → `../AI/data/data-sepsis/training` |
+| 모델 | `--ai-root` → `$SEWS_AI_REPO_ROOT` → `../AI` |
+| DB | `--database` → `$SEWS_DATABASE_PATH` → `Backend/data/sews.sqlite` |
+
+- `--limit 50`: 세트별 50명만 빠르게 시험합니다.
+- `--skip-convert`: 이미 변환한 JSON을 재사용합니다.
+- `--skip-validate`: 검증 단계를 건너뜁니다.
+- 검증에 실패하거나 모델 파일이 없으면 적재 전에 이유를 출력하고 멈춥니다(종료 코드 1).
+- 적재가 중간에 끊겨도 같은 명령을 다시 실행하면 이어서 진행합니다.
+- 실행이 끝나면 화면 마지막에 출력되는 `SEWS_DATABASE_PATH`로 API 서버를 띄웁니다.
+
+정상 실행 시 화면 예시입니다(가짜 모델 기준이라 경보·위험도 수치는 실제 모델과 다릅니다).
+
+```text
+[1/4] convert .psv -> import JSON
+  converted 40336/40336, failed 0
+[2/4] validate converted JSON against contract and originals
+valid 40336/40336
+[3/4] import into the local DB (resumable; log in _import_log.jsonl)
+  files 40336/40336 imported, 0 failed ; rows added 1552210, alerts added …
+[4/4] what the API will show
+  /patients        total 40336  latest risk {'high': …, 'low': …, 'unavailable': 9675}
+  /patients/{id}   e.g. /patients/pn19-p000001  (replay-time marked: 40336/40336)
+  /alerts          total …
+```
+
+아래 1)–4)는 각 단계를 따로 실행하거나 문제를 확인할 때 참고합니다.
+
+**1) 원본 위치 (커밋 안 함)**
+
+원본은 팀 공통 위치인 AI 저장소의 `data/data-sepsis/training/`에 둡니다. 스크립트가 이 경로를 자동으로 찾습니다.
+
+```text
+DMUsews/
+├── AI/data/data-sepsis/training/
+│   ├── training_setA/p000001.psv …   (20,336개)
+│   └── training_setB/p100001.psv …   (20,000개)
+└── Backend/
+```
+
+- 경로를 정하는 순서: `--source-root` 옵션 → `$SEWS_AI_REPO_ROOT/data/data-sepsis/training` → `Backend/../AI/data/data-sepsis/training`.
+- 현재 폴더와 상관없이 Backend 저장소 위치를 기준으로 계산합니다.
+- 원본이 다른 곳에 있으면 `--source-root 경로`로 지정합니다.
+
+| 항목 | 값 |
+|---|---|
+| 데이터 | PhysioNet/CinC Challenge 2019 **v1.0.0** 학습셋 전체 |
+| 대상 | `training_setA` 20,336명 + `training_setB` 20,000명 = **40,336명 전부** (선별 없음) |
+| 공식 경로 | https://physionet.org/content/challenge-2019/1.0.0/ (`training/training_setA`, `training/training_setB`) |
+| 팀 공유본 | `아카이브.zip` SHA-256 `b54e55854e6c9aa75a21c1947f970e5162bd1b0ad14957279bac1ab60277bb57` |
+| 원본 동일성 기준 | 변환 보고서의 `source_listing_sha256` = `96cb3e1100f7cd90484655096d1c4dd403b8f65f552f0b6bb66651d9d8dec79b` |
+
+원본이 아직 없다면 팀 공유본을 그 위치에 풉니다(`__MACOSX`는 제외).
+
+```sh
+unzip 아카이브.zip -x '__MACOSX/*' -d ../AI/data/data-sepsis/training
+```
+
+**2) 변환 규칙**
+
+- 입력 특징: `ICULOS` + 16개(HR, Temp, SBP, DBP, MAP, Resp, O2Sat, WBC, Lactate, Creatinine, Bilirubin_total, Platelets, FiO2, BUN, Glucose, pH). 나머지 열과 **`SepsisLabel`은 읽지도 쓰지도 않습니다.**
+- 단위: `physionet2019-source-v1` = PhysioNet 원본 단위(모델 전처리 통계도 원본 값 기준). **단위 변환·클리핑·보간 없음.** FiO2는 원본처럼 0–1 비율 값입니다. 범위를 벗어난 원본 25건도 그대로 두고 보고서 `warnings`에만 표시합니다.
+- 결측 `NaN` → `null`.
+- ICULOS: 원본 값 그대로입니다. 8,793명은 첫 ICULOS가 1이 아니라 2 이상(최대 304)에서 시작하는데, 행을 채우거나 당기지 않고 그대로 씁니다. 백엔드는 "첫 값이 1 이상의 정수이고 이후 1시간씩 빠짐없이 이어지는" 기록을 받습니다(예: 1,2,3… 또는 5,6,7…).
+- 시간: 원본에 실제 날짜가 없으므로 **연구 재생 시각**을 부여합니다. `admission_anchor = 2026-01-01T00:00:00Z`이고, 각 행은 `anchor + ICULOS시간`입니다. 파일의 `provenance.time_basis = "research_replay"`가 원본 관측 시각이 아님을 명시하며, DB `encounters.envelope`에도 저장됩니다. API는 항상 `data_delayed=true`, `delay_reason="replay_historical"`로 표시합니다.
+- ID: `encounter_id = pn19-<기록ID>`, `patient_id = <기록ID>`, 병상 `BED-<기록ID>`, 담당자 `research-rn-1..4`(가상, 기록 번호 기준 고정).
+- 재생 기준 시각을 `--replay-base`로 바꾸면 DB 해시가 달라져 같은 DB에 다시 넣을 때 `import_conflict`가 납니다. 팀 기준에서는 바꾸지 마세요.
+
+**3) 변환 → 검증 → 적재**
+
+```sh
+cd Backend
+export SEWS_AI_REPO_ROOT="$(pwd)/../AI"
+export SEWS_DATABASE_PATH="$(pwd)/data/sews.sqlite"
+
+# 변환: ../AI/data/data-sepsis/training → data/import/physionet2019/pn19-*.json (40,336개, 약 460MB, 1–2분)
+.venv/bin/python -m tools.physionet2019.convert
+#   빠른 확인용: --limit 50  (세트별 앞 50명만)
+
+# 검증(선택, DB 미사용): 스키마·라벨 부재·ICULOS 격자·재생 시각·원본 값/해시 일치 (--no-source: 원본 비교 생략)
+.venv/bin/python -m tools.physionet2019.validate
+
+# 적재: 폴더를 주면 *.json(밑줄로 시작하는 보고서 제외)을 모두 처리
+.venv/bin/python import_cli.py data/import/physionet2019 --report data/import/_import_report.json
+```
+
+Windows PowerShell은 `.venv\Scripts\python.exe`를 쓰고, 환경변수는 2절과 같이 설정합니다.
+
+적재는 환자마다 매 시간 모델을 호출하므로(총 약 155만 회) 실제 LSTM으로는 오래 걸립니다. 파일 단위로 커밋되므로 **중간에 끊겨도 같은 명령을 다시 실행하면** 이미 들어간 시간은 건너뛰고 이어서 적재합니다.
+
+**4) 결과 확인**
+
+- 변환: 마지막 줄의 `conversion_summary`가 `converted 40336, failed 0`이어야 합니다. `source_listing_sha256`이 위 표의 값과 같아야 같은 원본입니다. 자세한 내용은 `data/import/physionet2019/_conversion_report.json`에 있습니다(데이터 버전, 레코드별 sha256·행 수·ICULOS 시작값·실패 코드).
+- 적재 출력:
+  - stdout: 파일마다 성공 요약 한 줄.
+  - stderr: 실패는 `{"error":{"code",…},"file_index":n}`.
+  - 마지막 줄: `{"import_summary":{"files_total","files_imported","files_failed","records_added","alerts_added","failure_codes"}}`.
+  - 실패가 하나라도 있으면 종료 코드 1이지만, **나머지 파일은 계속 적재**합니다.
+- `--report` 파일에는 파일 경로별 결과와 실패 코드·메시지, 스키마 오류 위치(`loc`/`type`/`msg`)가 들어갑니다. 입력값은 기록하지 않습니다. 콘솔 출력에는 파일명·내용을 노출하지 않습니다.
+- 주요 실패 코드:
+  - `invalid_import`: 규격 불일치
+  - `file_unreadable`, `invalid_encoding`: 파일을 읽을 수 없음
+  - `import_conflict`: 같은 encounter_id에 다른 내용
+  - `future_observations`: 재생 시각이 현재보다 미래
+  - `inference_failed`: 모델 추론 실패
+- 다시 실행하면 `records_added=0`입니다(중복 적재 없음).
+- API는 서버를 같은 `SEWS_DATABASE_PATH`로 띄운 뒤 확인합니다.
+  - `GET /patients`: total 40,336, 그중 24행 미만 9,675명은 `unavailable`.
+  - `GET /patients/pn19-p000001`
+  - `GET /alerts?patient_id=pn19-p000001`
+  - 전체 목록 응답은 수 초 이상 걸릴 수 있습니다.
+
+DB를 처음부터 다시 만들려면 서버를 끄고 `data/sews.sqlite*`를 지운 뒤 적재를 다시 실행합니다.
 
 ### 4. 프론트 API 모드
 
