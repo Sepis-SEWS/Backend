@@ -1,5 +1,3 @@
-"""Atomic, append-only replay of explicitly timestamped source observations."""
-
 from __future__ import annotations
 
 import hashlib
@@ -111,12 +109,14 @@ def import_encounter(
         "encounter_id": payload.encounter_id,
         "unit_profile": payload.unit_profile,
         "time_mode": "anchor" if payload.admission_anchor is not None else "rows",
-        "anchor": _utc(times[0] - timedelta(hours=1)),
+        "anchor": _utc(times[0] - timedelta(hours=payload.observations[0].ICULOS)),
         "model_version": bundle.model_version,
         "threshold_version": bundle.threshold_version,
         "checkpoint_digest": bundle.checkpoint_digest,
         "policy_digest": bundle.policy_digest,
     }
+    if payload.provenance is not None:
+        envelope["provenance"] = payload.provenance.model_dump(mode="json")
     envelope_hash = _hash(envelope)
     raw = [row.values() for row in payload.observations]
     prefixes = []
@@ -130,7 +130,6 @@ def import_encounter(
     results = {}
     for index in range(existing, len(raw)):
         try:
-            # Give the runtime its own dictionaries; it must not mutate stored raw values.
             result = bundle.predict([dict(row) for row in raw[: index + 1]])
             _validate_result(result, index + 1)
             results[index + 1] = (canonical(result), datetime.now(UTC), dict(result))

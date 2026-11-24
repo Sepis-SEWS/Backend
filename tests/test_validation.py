@@ -1,9 +1,8 @@
-"""Boundary tests for file validation, model lifecycle, and safe serving errors."""
-
 import copy
 import sqlite3
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,7 +56,7 @@ class ValidationTests(unittest.TestCase):
             ImportFile.model_validate(data)
 
     def test_hourly_cadence_and_time_exclusivity(self):
-        for hour in (0, 0.5, 2, 1e300):
+        for hour in (0, 0.5, -1, 1e300):
             data = file_payload()
             data["observations"][0]["ICULOS"] = hour
             with self.subTest(hour=hour), self.assertRaises(ValidationError):
@@ -84,6 +83,18 @@ class ValidationTests(unittest.TestCase):
         data["observations"].append(second)
         self.assertEqual(ImportFile.model_validate(data).times()[0].hour, 1)
         data["observations"][1]["observed_at"] = "2020-01-01T12:00:00+09:00"
+        with self.assertRaises(ValidationError):
+            ImportFile.model_validate(data)
+
+    def test_iculos_may_start_after_hour_one_but_must_stay_contiguous(self):
+        data = file_payload()
+        data["observations"][0]["ICULOS"] = 2
+        second = copy.deepcopy(data["observations"][0])
+        second["ICULOS"] = 3
+        data["observations"].append(second)
+        times = ImportFile.model_validate(data).times()
+        self.assertEqual(times[1] - times[0], timedelta(hours=1))
+        data["observations"][1]["ICULOS"] = 4
         with self.assertRaises(ValidationError):
             ImportFile.model_validate(data)
 

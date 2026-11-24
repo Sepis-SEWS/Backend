@@ -1,5 +1,3 @@
-"""Synthetic-only import replay tests; no model artifacts or clinical files."""
-
 import copy
 import io
 import json
@@ -206,10 +204,13 @@ class ImportTests(unittest.TestCase):
             invalid = source()
             invalid[key] = value
             variants.append(invalid)
-        for offset in (2.0, 1.5):
+        for offset in (0.0, 1.5):
             invalid = source()
             invalid["observations"][0]["ICULOS"] = offset
             variants.append(invalid)
+        invalid = source()
+        invalid["observations"][5]["ICULOS"] = 7.0
+        variants.append(invalid)
         for key, value in (("HR", float("nan")), ("SepsisLabel", 1)):
             invalid = source()
             invalid["observations"][0][key] = value
@@ -361,11 +362,23 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(status, 1)
         loader.assert_called_once_with(Path(self.temp.name).resolve())
         self.assertEqual(len(self.rows("observations")), 24)
-        self.assertEqual(json.loads(output.getvalue())["records_added"], 24)
-        self.assertNotIn("secret", errors.getvalue())
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(lines[0]["records_added"], 24)
         self.assertEqual(
-            json.loads(errors.getvalue())["error"]["code"], "invalid_import"
+            lines[-1]["import_summary"],
+            {
+                "files_total": 2,
+                "files_imported": 1,
+                "files_failed": 1,
+                "records_added": 24,
+                "alerts_added": 1,
+                "failure_codes": {"invalid_import": 1},
+            },
         )
+        self.assertNotIn("secret", errors.getvalue())
+        error = json.loads(errors.getvalue())
+        self.assertEqual(error["error"]["code"], "invalid_import")
+        self.assertEqual(error["file_index"], 2)
 
     def test_cli_unavailable_model_writes_nothing(self):
         output, errors = io.StringIO(), io.StringIO()

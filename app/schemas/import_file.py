@@ -1,5 +1,3 @@
-"""Strict source-native hourly file contract, separate from serving inputs."""
-
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -69,6 +67,18 @@ class SourceRow(BaseModel):
         return self.model_dump(exclude={"observed_at"})
 
 
+class ReplayProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    source: Literal["physionet2019"]
+    dataset_version: str = Field(min_length=1, max_length=32)
+    source_set: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    source_record: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    converter: str = Field(min_length=1, max_length=64)
+    time_basis: Literal["research_replay"]
+    replay_base: AwareDatetime
+
+
 class ImportFile(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     encounter_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
@@ -79,10 +89,19 @@ class ImportFile(BaseModel):
     unit_profile: Literal["physionet2019-source-v1"] = "physionet2019-source-v1"
     admission_anchor: AwareDatetime | None = None
     observations: list[SourceRow] = Field(min_length=1, max_length=10000)
+    # Optional so existing hand-written files and stored envelopes are unchanged.
+    provenance: ReplayProvenance | None = None
 
     @model_validator(mode="after")
     def chronological_hourly(self) -> "ImportFile":
         explicit = [row.observed_at is not None for row in self.observations]
+        if self.provenance is not None and (
+            self.admission_anchor is None
+            or self.admission_anchor != self.provenance.replay_base
+        ):
+            raise ValueError(
+                "Replay provenance requires admission_anchor == replay_base"
+            )
         if self.admission_anchor is not None:
             if any(explicit):
                 raise ValueError("Choose admission_anchor OR per-row observed_at")
@@ -90,9 +109,13 @@ class ImportFile(BaseModel):
             raise ValueError(
                 "Every row needs observed_at when admission_anchor is absent"
             )
-        for hour, row in enumerate(self.observations, 1):
-            if row.ICULOS != hour:
-                raise ValueError("Import ICULOS must be the hourly grid 1..n")
+
+        start = self.observations[0].ICULOS
+        if start < 1 or start != int(start):
+            raise ValueError("Import ICULOS must start at an integer hour >= 1")
+        for offset, row in enumerate(self.observations):
+            if row.ICULOS != start + offset:
+                raise ValueError("Import ICULOS must be a contiguous hourly grid")
         try:
             times = self.times()
         except (OverflowError, ValueError):

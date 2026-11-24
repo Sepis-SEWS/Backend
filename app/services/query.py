@@ -1,5 +1,3 @@
-"""Consistent read projections and transactional acknowledgement/care writes."""
-
 import base64
 import hashlib
 import json
@@ -78,7 +76,8 @@ def _patient(connection, encounter, now: datetime) -> PatientSummary:
         "SELECT id,acknowledged_at FROM alerts WHERE encounter_id=? ORDER BY hour DESC",
         (encounter["id"],),
     ).fetchall()
-    delayed = now - observed_at > timedelta(hours=2)
+    replay = (envelope.get("provenance") or {}).get("time_basis") == "research_replay"
+    delayed = replay or now - observed_at > timedelta(hours=2)
     return PatientSummary(
         id=encounter["id"],
         bed=envelope["bed"],
