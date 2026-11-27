@@ -16,7 +16,19 @@ def canonical(value) -> str:
     )
 
 
-SCHEMA = """
+ALERT_COLUMNS = """(
+ id TEXT PRIMARY KEY, encounter_id TEXT NOT NULL REFERENCES encounters(id), hour INTEGER,
+ snapshot TEXT NOT NULL, acknowledged_by TEXT, acknowledged_at TEXT,
+ manual_actor TEXT, manual_key TEXT, manual_body_hash TEXT,
+ UNIQUE(encounter_id,hour), UNIQUE(encounter_id,manual_actor,manual_key),
+ FOREIGN KEY(encounter_id,hour) REFERENCES observations(encounter_id,hour),
+ CHECK (
+  (hour IS NOT NULL AND manual_actor IS NULL AND manual_key IS NULL AND manual_body_hash IS NULL)
+  OR (hour IS NULL AND manual_actor IS NOT NULL AND manual_key IS NOT NULL AND manual_body_hash IS NOT NULL)
+ )
+)"""
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS encounters (
  id TEXT PRIMARY KEY, envelope TEXT NOT NULL, envelope_hash TEXT NOT NULL
 );
@@ -32,12 +44,7 @@ CREATE TABLE IF NOT EXISTS predictions (
  UNIQUE(encounter_id,hour),
  FOREIGN KEY(encounter_id,hour) REFERENCES observations(encounter_id,hour)
 );
-CREATE TABLE IF NOT EXISTS alerts (
- id TEXT PRIMARY KEY, encounter_id TEXT NOT NULL, hour INTEGER NOT NULL,
- snapshot TEXT NOT NULL, acknowledged_by TEXT, acknowledged_at TEXT,
- UNIQUE(encounter_id,hour),
- FOREIGN KEY(encounter_id,hour) REFERENCES observations(encounter_id,hour)
-);
+CREATE TABLE IF NOT EXISTS alerts {ALERT_COLUMNS};
 CREATE TABLE IF NOT EXISTS records (
  id TEXT PRIMARY KEY, alert_id TEXT NOT NULL REFERENCES alerts(id),
  actor TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL, saved_at TEXT NOT NULL,
@@ -55,7 +62,27 @@ class Store:
         connection = sqlite3.connect(self.path, timeout=10)
         try:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript(SCHEMA)
+            # Rebuild the legacy parent table without touching its dependent records.
+            connection.execute("PRAGMA foreign_keys=OFF")
+            with connection:
+                connection.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+                columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(alerts)")
+                }
+                if "manual_key" not in columns:
+                    connection.execute(f"CREATE TABLE alerts_migrated {ALERT_COLUMNS}")
+                    fields = (
+                        "id,encounter_id,hour,snapshot,acknowledged_by,acknowledged_at"
+                    )
+                    connection.execute(
+                        f"INSERT INTO alerts_migrated({fields}) SELECT {fields} FROM alerts"
+                    )
+                    connection.execute("DROP TABLE alerts")
+                    connection.execute("ALTER TABLE alerts_migrated RENAME TO alerts")
+                    if connection.execute("PRAGMA foreign_key_check").fetchone():
+                        raise sqlite3.IntegrityError(
+                            "Alert migration would break foreign keys"
+                        )
         finally:
             connection.close()
 

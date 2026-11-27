@@ -104,15 +104,24 @@ class CareRecord(RecordDraft):
     saved_at: AwareDatetime
 
 
+class ManualAlertDraft(Model):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    message: str = Field(min_length=1, max_length=2000)
+    record: RecordDraft | None = None
+
+
 class AlertEvent(Model):
     id: str
     patient_id: str
     bed: str | None = None
     assignee: str | None = None
-    risk_score: float = Field(ge=0, le=1)
-    risk_level: Literal["high", "warning", "low"]
-    model_version: str
-    threshold_version: str
+    source: Literal["model", "manual"] = "model"
+    message: str | None = Field(default=None, min_length=1, max_length=2000)
+    created_by: str | None = None
+    risk_score: float | None = Field(ge=0, le=1)
+    risk_level: Literal["high", "warning", "low"] | None
+    model_version: str | None
+    threshold_version: str | None
     occurred_at: AwareDatetime
     status: Literal["unacknowledged", "acknowledged"]
     acknowledged_by: str | None = None
@@ -122,6 +131,27 @@ class AlertEvent(Model):
 
     @model_validator(mode="after")
     def consistency(self):
+        model_fields = (
+            self.risk_score,
+            self.risk_level,
+            self.model_version,
+            self.threshold_version,
+        )
+        if self.source == "manual":
+            if (
+                not self.message
+                or not self.created_by
+                or any(field is not None for field in model_fields)
+            ):
+                raise ValueError(
+                    "Manual alerts need a message and author without model fields"
+                )
+        elif (
+            self.message is not None
+            or self.created_by is not None
+            or any(field is None for field in model_fields)
+        ):
+            raise ValueError("Model alerts need model fields without manual metadata")
         acknowledged = self.status == "acknowledged"
         if acknowledged != (
             self.acknowledged_at is not None and bool(self.acknowledged_by)

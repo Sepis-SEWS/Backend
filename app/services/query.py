@@ -12,6 +12,7 @@ from app.schemas.dashboard import (
     Detail,
     Explanation,
     Listing,
+    ManualAlertDraft,
     Observation,
     PatientDetail,
     PatientSummary,
@@ -73,9 +74,15 @@ def _patient(connection, encounter, now: datetime) -> PatientSummary:
         )
     observed_at = datetime.fromisoformat(latest["observed_at"])
     alerts = connection.execute(
-        "SELECT id,acknowledged_at FROM alerts WHERE encounter_id=? ORDER BY hour DESC",
+        "SELECT id,acknowledged_at,json_extract(snapshot, '$.occurred_at') AS occurred_at "
+        "FROM alerts WHERE encounter_id=?",
         (encounter["id"],),
     ).fetchall()
+    latest_alert = max(
+        alerts,
+        key=lambda row: (datetime.fromisoformat(row["occurred_at"]), row["id"]),
+        default=None,
+    )
     replay = (envelope.get("provenance") or {}).get("time_basis") == "research_replay"
     delayed = replay or now - observed_at > timedelta(hours=2)
     return PatientSummary(
@@ -87,7 +94,7 @@ def _patient(connection, encounter, now: datetime) -> PatientSummary:
         prediction=prediction(latest, latest["observed_at"]),
         data_delayed=delayed,
         delay_reason="replay_historical" if delayed else None,
-        latest_alert_id=alerts[0]["id"] if alerts else None,
+        latest_alert_id=latest_alert["id"] if latest_alert else None,
         unacknowledged_alert_count=sum(a["acknowledged_at"] is None for a in alerts),
     )
 
@@ -218,7 +225,7 @@ def list_patients(
         unacked = []
         for patient in patients:
             unacked.extend(
-                json.loads(r["snapshot"])["occurred_at"]
+                json.loads(r["snapshot"])
                 for r in connection.execute(
                     "SELECT snapshot FROM alerts WHERE encounter_id=? AND acknowledged_at IS NULL",
                     (patient.id,),
@@ -235,8 +242,13 @@ def list_patients(
             unacknowledged_alert_count=sum(
                 p.unacknowledged_alert_count for p in patients
             ),
-            unacknowledged_high_count=len(unacked),
-            oldest_unacknowledged_at=min(unacked) if unacked else None,
+            unacknowledged_high_count=sum(
+                alert["risk_level"] == "high" for alert in unacked
+            ),
+            oldest_unacknowledged_at=min(
+                (datetime.fromisoformat(alert["occurred_at"]) for alert in unacked),
+                default=None,
+            ),
         )
         selected, next_cursor = _page(
             patients, lambda p: [p.id], cursor, _signature("patients", filters), limit
@@ -288,7 +300,7 @@ def list_alerts(
             high=sum(a.risk_level == "high" for a in alerts),
             warning=sum(a.risk_level == "warning" for a in alerts),
             unacknowledged_alert_count=len(unacked),
-            unacknowledged_high_count=len(unacked),
+            unacknowledged_high_count=sum(a.risk_level == "high" for a in unacked),
             oldest_unacknowledged_at=min(
                 (a.occurred_at for a in unacked), default=None
             ),
@@ -329,15 +341,106 @@ def acknowledge(store: Store, identifier: str, actor: str) -> AlertEvent:
         )
 
 
-def save_record(
-    store: Store, identifier: str, actor: str, key: str, draft: RecordDraft
-) -> CareRecord:
+def _validate_key(key: str) -> None:
     if not key or not key.strip() or len(key) > 128:
         raise ServiceError(
             422,
             "invalid_idempotency_key",
             "A nonempty Idempotency-Key of at most 128 characters is required",
         )
+
+
+def _insert_record(
+    connection, alert_id: str, actor: str, key: str, body: str, when: str
+) -> CareRecord:
+    record_id = str(uuid4())
+    connection.execute(
+        "INSERT INTO records VALUES(?,?,?,?,?,?)",
+        (record_id, alert_id, actor, key, body, when),
+    )
+    return _record(
+        connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+    )
+
+
+def create_manual_alert(
+    store: Store, patient_id: str, actor: str, key: str, draft: ManualAlertDraft
+) -> AlertEvent:
+    _validate_key(key)
+    body_hash = hashlib.sha256(
+        canonical(draft.model_dump()).encode("utf-8")
+    ).hexdigest()
+    with store.connect(write=True) as connection:
+        encounter = connection.execute(
+            "SELECT envelope FROM encounters WHERE id=?", (patient_id,)
+        ).fetchone()
+        if encounter is None:
+            not_found()
+        previous = connection.execute(
+            "SELECT * FROM alerts WHERE encounter_id=? AND manual_actor=? AND manual_key=?",
+            (patient_id, actor, key),
+        ).fetchone()
+        if previous is not None:
+            if previous["manual_body_hash"] != body_hash:
+                raise ServiceError(
+                    409,
+                    "idempotency_conflict",
+                    "This key has already been used with a different body",
+                )
+            return _alert(connection, previous)
+
+        envelope = json.loads(encounter["envelope"])
+        alert_id = str(uuid4())
+        when = utc_now().isoformat()
+        snapshot = {
+            "id": alert_id,
+            "patient_id": patient_id,
+            "bed": envelope["bed"],
+            "assignee": envelope["assignee"],
+            "source": "manual",
+            "message": draft.message,
+            "created_by": actor,
+            "risk_score": None,
+            "risk_level": None,
+            "model_version": None,
+            "threshold_version": None,
+            "occurred_at": when,
+        }
+        connection.execute(
+            "INSERT INTO alerts(id,encounter_id,snapshot,acknowledged_by,acknowledged_at,"
+            "manual_actor,manual_key,manual_body_hash) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                alert_id,
+                patient_id,
+                canonical(snapshot),
+                actor if draft.record else None,
+                when if draft.record else None,
+                actor,
+                key,
+                body_hash,
+            ),
+        )
+        if draft.record:
+            _insert_record(
+                connection,
+                alert_id,
+                actor,
+                key,
+                canonical(draft.record.model_dump()),
+                when,
+            )
+        return _alert(
+            connection,
+            connection.execute(
+                "SELECT * FROM alerts WHERE id=?", (alert_id,)
+            ).fetchone(),
+        )
+
+
+def save_record(
+    store: Store, identifier: str, actor: str, key: str, draft: RecordDraft
+) -> CareRecord:
+    _validate_key(key)
     body = canonical(draft.model_dump())
     with store.connect(write=True) as connection:
         alert = connection.execute(
@@ -363,13 +466,6 @@ def save_record(
                     "This key has already been used with a different body",
                 )
             return _record(row)
-        record_id = str(uuid4())
-        connection.execute(
-            "INSERT INTO records VALUES(?,?,?,?,?,?)",
-            (record_id, identifier, actor, key, body, utc_now().isoformat()),
-        )
-        return _record(
-            connection.execute(
-                "SELECT * FROM records WHERE id=?", (record_id,)
-            ).fetchone()
+        return _insert_record(
+            connection, identifier, actor, key, body, utc_now().isoformat()
         )

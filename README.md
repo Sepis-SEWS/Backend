@@ -45,6 +45,7 @@
 
 - **순수 추론:** `/predict`, `/predict_batch` → DB 저장 없음.
 - **대시보드:** `/patients`, `/patients/{id}`, `/alerts`.
+- **수동 경보 작성:** `POST /patients/{id}/alerts` · 해당 입원 건의 경보 내용·작성자·서버 시각 · 선택 평가·조치 · SQLite 저장.
 - **확인·기록:** 경보 확인 후 조치 저장. 반복 요청 중복 방지.
 - **상태:** `/health` → 모델 준비·DB 상태 분리 확인.
 

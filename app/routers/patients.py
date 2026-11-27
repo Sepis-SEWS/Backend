@@ -1,11 +1,17 @@
 """Stored encounter listing and raw observations, never request-time scoring."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 
 from app.routers.deps import authorize
-from app.schemas.dashboard import Detail, Listing, PatientSummary
+from app.schemas.dashboard import (
+    AlertEvent,
+    Detail,
+    Listing,
+    ManualAlertDraft,
+    PatientSummary,
+)
 from app.services import query as service
 
 router = APIRouter(dependencies=[Depends(authorize)])
@@ -37,3 +43,21 @@ def patients(
 @router.get("/patients/{patient_id}", response_model=Detail)
 def patient(patient_id: str, request: Request):
     return service.patient_detail(request.app.state.store, patient_id)
+
+
+@router.post(
+    "/patients/{patient_id}/alerts", response_model=AlertEvent, status_code=201
+)
+def create_alert(
+    patient_id: str,
+    draft: ManualAlertDraft,
+    request: Request,
+    key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
+):
+    return service.create_manual_alert(
+        request.app.state.store,
+        patient_id,
+        request.app.state.settings.actor,
+        key,
+        draft,
+    )

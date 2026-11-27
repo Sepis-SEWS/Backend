@@ -18,12 +18,20 @@ from app.config import Settings
 from app.schemas.import_file import FEATURES, ImportFile
 from app.services.import_run import import_encounter
 from app.services.inference import ModelBundle
+from app.store.sqlite import ALERT_COLUMNS, SCHEMA
 from main import create_app
 
 FRONTEND = Path(__file__).resolve().parents[2] / "Frontend"
 sys.path.insert(0, str(FRONTEND))
 from config import Settings as FrontendSettings
-from domain.schemas import Detail, Health, Listing, PatientSummary, RecordDraft
+from domain.schemas import (
+    Detail,
+    Health,
+    Listing,
+    ManualAlertDraft,
+    PatientSummary,
+    RecordDraft,
+)
 from services.api_client import ApiGateway
 from services.gateway import ServiceError as FrontendError
 
@@ -79,7 +87,7 @@ class DashboardTests(unittest.TestCase):
             ImportFile.model_validate(payload()), self.app.state.store, self.bundle
         )
 
-    def test_real_frontend_gateway_workflow_and_restart(self):
+    def frontend_gateway(self):
         def handle(request):
             response = self.client.request(
                 request.method,
@@ -91,10 +99,13 @@ class DashboardTests(unittest.TestCase):
                 response.status_code, headers=response.headers, content=response.content
             )
 
-        gateway = ApiGateway(
+        return ApiGateway(
             FrontendSettings(mode="api", api_base_url="http://testserver"),
             transport=httpx.MockTransport(handle),
         )
+
+    def test_real_frontend_gateway_workflow_and_restart(self):
+        gateway = self.frontend_gateway()
         self.assertTrue(gateway.get_health().model_ready)
         patients = gateway.list_patients({})
         self.assertEqual(patients.summary.high, 1)
@@ -124,6 +135,134 @@ class DashboardTests(unittest.TestCase):
             result = client.get("/alerts", params={"patient_id": "episode-a"}).json()
             self.assertEqual(result["items"][0]["records"][0]["id"], saved.id)
             self.assertEqual(client.get("/health").json()["status"], "degraded")
+
+    def test_manual_alert_for_patient_without_model_alert_and_restart(self):
+        import_encounter(
+            ImportFile.model_validate(payload("episode-b", 23)),
+            self.app.state.store,
+            self.bundle,
+        )
+        gateway = self.frontend_gateway()
+        self.assertEqual(gateway.list_alerts({"patient_id": "episode-b"}).items, [])
+        draft = ManualAlertDraft(
+            message=" manual note ",
+            record=RecordDraft(assessment="assessment", action="action"),
+        )
+        created = gateway.create_manual_alert("episode-b", draft, "manual-key")
+        retry = gateway.create_manual_alert("episode-b", draft, "manual-key")
+        self.assertEqual(retry, created)
+        self.assertEqual(created.message, "manual note")
+        self.assertEqual(created.created_by, self.settings.actor)
+        self.assertIsNone(created.risk_score)
+        self.assertEqual(created.status, "acknowledged")
+        self.assertEqual([record.action for record in created.records], ["action"])
+        self.assertEqual(
+            gateway.get_patient("episode-b").item.latest_alert_id, created.id
+        )
+
+        restarted = create_app(self.settings, model_loader=unavailable)
+        with TestClient(restarted) as client:
+            response = client.get("/alerts", params={"patient_id": "episode-b"}).json()
+            self.assertEqual([item["id"] for item in response["items"]], [created.id])
+            self.assertEqual(
+                response["items"][0]["records"][0]["id"], created.records[0].id
+            )
+            self.assertEqual(
+                client.get("/alerts").json()["items"][0]["source"], "manual"
+            )
+
+    def test_manual_alert_retry_validation_and_unacknowledged_counts(self):
+        url = "/patients/episode-a/alerts"
+        headers = {"Idempotency-Key": "manual-key"}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            writes = list(
+                pool.map(
+                    lambda _: self.client.post(
+                        url, json={"message": "note"}, headers=headers
+                    ),
+                    range(4),
+                )
+            )
+        self.assertEqual([response.status_code for response in writes], [201] * 4)
+        created = writes[0].json()
+        self.assertEqual(
+            {response.json()["id"] for response in writes}, {created["id"]}
+        )
+        self.assertEqual(created["status"], "unacknowledged")
+        self.assertEqual(
+            self.client.post(
+                url, json={"message": "different"}, headers=headers
+            ).status_code,
+            409,
+        )
+        self.assertEqual(
+            self.client.post(url, json={"message": " "}, headers=headers).status_code,
+            422,
+        )
+        self.assertEqual(
+            self.client.post(url, json={"message": "note"}).status_code, 422
+        )
+        self.assertEqual(
+            self.client.post(
+                "/patients/missing/alerts", json={"message": "note"}, headers=headers
+            ).status_code,
+            404,
+        )
+        summary = self.client.get("/patients").json()["summary"]
+        self.assertEqual(summary["unacknowledged_alert_count"], 4)
+        self.assertEqual(summary["unacknowledged_high_count"], 3)
+        base = f"/alerts/{created['id']}"
+        self.assertEqual(self.client.post(base + "/acknowledgement").status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                base + "/records",
+                json={"assessment": "review", "action": "document"},
+                headers=headers,
+            ).status_code,
+            200,
+        )
+
+    def test_legacy_database_keeps_alerts_and_care_records(self):
+        model_alert = self.client.get("/alerts").json()["items"][0]
+        url = f"/alerts/{model_alert['id']}"
+        self.client.post(url + "/acknowledgement")
+        saved = self.client.post(
+            url + "/records",
+            json={"assessment": "legacy", "action": "review"},
+            headers={"Idempotency-Key": "legacy"},
+        ).json()
+        legacy_path = Path(self.temp.name) / "legacy.sqlite"
+        legacy_alert_columns = """(
+            id TEXT PRIMARY KEY, encounter_id TEXT NOT NULL, hour INTEGER NOT NULL,
+            snapshot TEXT NOT NULL, acknowledged_by TEXT, acknowledged_at TEXT,
+            UNIQUE(encounter_id,hour),
+            FOREIGN KEY(encounter_id,hour) REFERENCES observations(encounter_id,hour)
+        )"""
+        with sqlite3.connect(legacy_path) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.executescript(
+                SCHEMA.replace(ALERT_COLUMNS, legacy_alert_columns)
+            )
+            connection.execute(
+                "ATTACH DATABASE ? AS source", (str(self.settings.database),)
+            )
+            for table in ("encounters", "observations", "predictions"):
+                connection.execute(f"INSERT INTO {table} SELECT * FROM source.{table}")
+            connection.execute(
+                "INSERT INTO alerts SELECT id,encounter_id,hour,snapshot,acknowledged_by,acknowledged_at FROM source.alerts"
+            )
+            connection.execute("INSERT INTO records SELECT * FROM source.records")
+
+        migrated = create_app(Settings(database=legacy_path), model_loader=unavailable)
+        with TestClient(migrated) as client:
+            events = client.get("/alerts").json()["items"]
+            self.assertEqual(len(events), 3)
+            self.assertEqual(events[0]["source"], "model")
+            self.assertEqual(events[0]["records"][0]["id"], saved["id"])
+            with migrated.state.store.connect() as connection:
+                self.assertIsNone(
+                    connection.execute("PRAGMA foreign_key_check").fetchone()
+                )
 
     def test_sparse_projection_horizon_units_and_event_clock(self):
         response = self.client.get("/patients/episode-a")
