@@ -21,5 +21,7 @@ def prediction(row, observed_at: str) -> Prediction:
         model_version=row["model_version"],
         threshold_version=row["threshold_version"],
         prediction_id=row["id"],
+        calibrated_probability=result.get("calibrated_probability"),
+        calibration_available=result.get("calibrated_probability") is not None,
         unavailable_reason="insufficient_history" if score is None else None,
     )
