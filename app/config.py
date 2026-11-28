@@ -16,7 +16,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         root = os.environ.get("SEWS_AI_REPO_ROOT", "").strip()
         return cls(
-            database=Path(os.environ.get("SEWS_DATABASE_PATH", "data/sews.sqlite"))
+            database=Path(os.environ.get("SEWS_DATABASE_PATH", "data/sews_v2_16.sqlite"))
             .expanduser()
             .resolve(),
             ai_root=Path(root).expanduser().resolve() if root else None,
