@@ -21,11 +21,11 @@ class ModelBundle:
 
     @property
     def model_version(self) -> str:
-        return f"lstm_full_pw10:{self.checkpoint_digest}"
+        return f"personal_xgb_v2_16:{self.checkpoint_digest}"
 
     @property
     def threshold_version(self) -> str:
-        return f"locked-uncalibrated-0.2:{self.policy_digest}"
+        return f"locked-raw-0.10338947921991348:{self.policy_digest}"
 
     def predict(self, observations: list[dict]) -> dict:
         model, stats, predict = self.state
@@ -35,9 +35,9 @@ class ModelBundle:
 def load_bundle(root: Path | None) -> ModelBundle:
     if root is None:
         raise RuntimeError("SEWS_AI_REPO_ROOT is required")
-    module_path = root / "src/inference/predict_lstm.py"
+    module_path = root / "src/inference/predict_v2.py"
     spec = importlib.util.spec_from_file_location(
-        "sews_frozen_predict_lstm", module_path
+        "sews_frozen_predict_v2", module_path
     )
     if spec is None or spec.loader is None:
         raise RuntimeError("AI inference module is unavailable")
