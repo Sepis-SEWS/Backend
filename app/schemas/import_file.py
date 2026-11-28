@@ -21,6 +21,7 @@ FEATURES = (
     "Glucose",
     "pH",
 )
+MODEL_FEATURES = FEATURES + ("EtCO2", "BaseExcess", "HCO3", "PaCO2", "SaO2", "AST", "Alkalinephos", "Calcium", "Chloride", "Bilirubin_direct", "Magnesium", "Phosphate", "Potassium", "TroponinI", "Hct", "Hgb", "PTT", "Fibrinogen", "Age", "Gender", "Unit1", "Unit2", "HospAdmTime")
 UNITS = {
     "HR": "bpm",
     "Temp": "°C",
@@ -60,6 +61,29 @@ class SourceRow(BaseModel):
     BUN: float | None
     Glucose: float | None
     pH: float | None
+    EtCO2: float | None
+    BaseExcess: float | None
+    HCO3: float | None
+    PaCO2: float | None
+    SaO2: float | None
+    AST: float | None
+    Alkalinephos: float | None
+    Calcium: float | None
+    Chloride: float | None
+    Bilirubin_direct: float | None
+    Magnesium: float | None
+    Phosphate: float | None
+    Potassium: float | None
+    TroponinI: float | None
+    Hct: float | None
+    Hgb: float | None
+    PTT: float | None
+    Fibrinogen: float | None
+    Age: float | None
+    Gender: float | None
+    Unit1: float | None
+    Unit2: float | None
+    HospAdmTime: float | None
     # Timestamp parsing is allowed, but numerical coercion is not.
     observed_at: AwareDatetime | None = Field(default=None, strict=False)
 
