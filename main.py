@@ -19,9 +19,9 @@ from app.store.sqlite import Store
 def create_app(settings: Settings | None = None, model_loader=load_bundle) -> FastAPI:
     settings = settings or Settings.from_env()
     app = FastAPI(
-        title="SEWS Locked LSTM and Dashboard API",
+        title="SEWS Locked v2-16 and Dashboard API",
         version="0.2.0",
-        description="Deidentified local research prototype. Scores are not calibrated sepsis probabilities.",
+        description="Deidentified local research prototype. Raw scores are not sepsis probabilities; optional research calibration is separate.",
         lifespan=lifespan,
     )
     app.state.settings = settings
