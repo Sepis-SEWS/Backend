@@ -10,14 +10,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.schemas.import_file import FEATURES, ImportFile
+from app.schemas.import_file import MODEL_FEATURES as FEATURES, ImportFile
 
 DATASET_NAME = "PhysioNet/CinC Challenge 2019 (Early Prediction of Sepsis)"
 DATASET_VERSION = "1.0.0"
 DATASET_URL = "https://physionet.org/content/challenge-2019/1.0.0/"
 SOURCE_SETS = ("training_setA", "training_setB")
 EXPECTED_COUNTS = {"training_setA": 20336, "training_setB": 20000}
-CONVERTER = "physionet2019-psv-to-import-v2"
+CONVERTER = "physionet2019-psv-to-import-v3"
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -27,7 +27,7 @@ def default_source_root() -> Path:
     return (base / "data" / "data-sepsis" / "training").resolve()
 
 
-DEFAULT_OUT = BACKEND_ROOT / "data" / "import" / "physionet2019"
+DEFAULT_OUT = BACKEND_ROOT / "data" / "import" / "physionet2019_v2_16"
 DEFAULT_REPLAY_BASE = datetime(2026, 1, 1, tzinfo=UTC)
 ASSIGNEES = ("research-rn-1", "research-rn-2", "research-rn-3", "research-rn-4")
 SOURCE_COLUMNS = [
@@ -194,7 +194,7 @@ def check_import(
             )
         if set(row) != ROW_KEYS:
             problems.append(
-                f"row {position}: keys differ from ICULOS + 16 model features"
+                f"row {position}: keys differ from ICULOS + 39 model features"
             )
             break
     if payload.provenance is None or payload.provenance.time_basis != "research_replay":
