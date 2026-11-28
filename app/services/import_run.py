@@ -55,16 +55,16 @@ def _validate_result(result: dict, count: int) -> None:
         or type(result.get("minimum_records")) is not int
         or result["minimum_records"] != 24
         or type(result.get("score_threshold")) not in (int, float)
-        or result["score_threshold"] != 0.2
+        or result["score_threshold"] != 0.10338947921991348
         or "calibrated_probability" not in result
-        or result["calibrated_probability"] is not None
         or type(result.get("alert")) is not bool
     ):
         raise invalid
-    if (
-        "calibration_available" in result
-        and result["calibration_available"] is not False
-    ):
+    q = result["calibrated_probability"]
+    if count < 24:
+        if q is not None:
+            raise invalid
+    elif type(q) not in (int, float) or not math.isfinite(q) or not 0 <= q <= 1:
         raise invalid
     score = result.get("risk_score")
     if count < 24:
@@ -80,7 +80,7 @@ def _validate_result(result: dict, count: int) -> None:
         or type(score) not in (int, float)
         or not math.isfinite(score)
         or not 0 <= score <= 1
-        or result["alert"] != (score >= 0.2)
+        or result["alert"] != (score >= 0.10338947921991348)
     ):
         raise invalid
     try:
