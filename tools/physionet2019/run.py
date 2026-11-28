@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     database = (
         args.database.resolve()
         if args.database
-        else _env_path("SEWS_DATABASE_PATH", BACKEND_ROOT / "data" / "sews.sqlite")
+        else _env_path("SEWS_DATABASE_PATH", BACKEND_ROOT / "data" / "sews_v2_16.sqlite")
     )
     out = args.out.resolve()
     reports = out.parent
@@ -138,8 +138,8 @@ def main(argv: list[str] | None = None) -> int:
             f"  converted {summary['converted']}/{summary['records']}, "
             f"failed {summary['failed']} {summary['failure_codes'] or ''} ({_done(started)})"
         )
-        if status != 0 and summary["converted"] == 0:
-            print("stopped: nothing was converted", file=sys.stderr)
+        if status != 0:
+            print("stopped: conversion failed", file=sys.stderr)
             return 1
     else:
         print("\n[1/4] convert skipped (--skip-convert)")
